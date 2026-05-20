@@ -3,23 +3,25 @@ const AudioRoom = require('../models/AudioRoom');
 // Create a new audio room
 exports.createRoom = async (req, res) => {
   try {
-    const { title } = req.body;
+    const { title, durationMinutes } = req.body;
     const hostId = req.user._id;
 
     if (!title) {
       return res.status(400).json({ error: 'Room title is required' });
     }
 
+    // Default to 60 minutes if not provided
+    const mins = durationMinutes || 60;
+    const expiresAt = new Date(Date.now() + mins * 60 * 1000);
+
     const room = new AudioRoom({
       title,
       hostId,
-      // The host automatically joins as a speaker
+      expiresAt, // Save the expiration time
       speakers: [{ userId: hostId, isMuted: false }] 
     });
 
     await room.save();
-
-    // Populate host details before returning
     await room.populate('hostId', 'username avatarUrl');
 
     res.status(201).json(room);
@@ -32,11 +34,18 @@ exports.createRoom = async (req, res) => {
 // Get all currently active rooms
 exports.getActiveRooms = async (req, res) => {
   try {
-    const rooms = await AudioRoom.find({ isActive: true })
+    // FIX: Only fetch rooms where `expiresAt` is in the future!
+    const rooms = await AudioRoom.find({ 
+      isActive: true,
+      $or: [
+        { expiresAt: { $gt: new Date() } },
+        { expiresAt: { $exists: false } } // Fallback for old rooms
+      ]
+    })
       .populate('hostId', 'username avatarUrl')
       .populate('speakers.userId', 'username avatarUrl')
       .sort({ createdAt: -1 })
-      .limit(50); // Limit to prevent massive payloads
+      .limit(50);
 
     res.json(rooms);
   } catch (error) {

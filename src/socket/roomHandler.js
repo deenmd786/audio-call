@@ -3,51 +3,45 @@ const AudioRoom = require('../models/AudioRoom');
 const setupRoomHandlers = (io, socket, socketToUser, userToSockets) => {
   
   // Join audio room
- // Join audio room
-  socket.on('join-room', async ({ roomId }) => { // REMOVED the 'callback' parameter
+  socket.on('join-room', async ({ roomId }) => {
     try {
-      console.log(`[SOCKET] User ${socket.user.username} attempting to join room ${roomId}`);
       const room = await AudioRoom.findById(roomId);
-      
       if (!room || !room.isActive) {
-        // FIX: Use socket.emit instead of callback
         socket.emit('join-room-response', { success: false, error: 'Room not found or inactive' });
         return;
       }
       
-      // Add user as listener
-      await room.addListener(socket.user._id);
+      // FIX: If the HOST joins, put them in speakers. Otherwise, put them in listeners.
+      if (room.hostId.equals(socket.user._id)) {
+        if (!room.speakers.some(s => s.userId.equals(socket.user._id))) {
+          room.speakers.push({ userId: socket.user._id, isMuted: false });
+        }
+        // Ensure they aren't stuck in listeners
+        room.listeners = room.listeners.filter(l => !l.userId.equals(socket.user._id));
+        await room.save();
+      } else {
+        await room.addListener(socket.user._id);
+      }
       
-      // Join socket.io room
       socket.join(roomId);
       
-      // Get current room state
       const roomState = {
         roomId: room._id,
         title: room.title,
         hostId: room.hostId,
-        speakers: room.speakers.map(s => ({
-          userId: s.userId,
-          isMuted: s.isMuted
-        })),
-        listeners: room.listeners.map(l => ({
-          userId: l.userId,
-          handRaised: l.handRaised
-        })),
+        speakers: room.speakers.map(s => ({ userId: s.userId, isMuted: s.isMuted })),
+        listeners: room.listeners.map(l => ({ userId: l.userId, handRaised: l.handRaised })),
         currentUserRole: room.hostId.equals(socket.user._id) ? 'host' : 
                        room.speakers.some(s => s.userId.equals(socket.user._id)) ? 'speaker' : 'listener'
       };
       
-      // Notify others
       socket.to(roomId).emit('user-joined', {
         userId: socket.user._id,
         username: socket.user.username,
-        role: 'listener'
+        role: room.hostId.equals(socket.user._id) ? 'host' : 'listener'
       });
       
-      // FIX: Use socket.emit to send the success data back to Flutter!
       socket.emit('join-room-response', { success: true, roomState });
-      
     } catch (error) {
       console.error('Error joining room:', error);
       socket.emit('join-room-response', { success: false, error: 'Failed to join room' });
@@ -61,23 +55,8 @@ const setupRoomHandlers = (io, socket, socketToUser, userToSockets) => {
       if (room && room.isActive) {
         await room.removeParticipant(socket.user._id);
         
-        // Check if host left, assign new host or close room
-        if (room.hostId.equals(socket.user._id)) {
-          if (room.speakers.length > 0) {
-            // Assign first speaker as new host
-            room.hostId = room.speakers[0].userId;
-            await room.save();
-            io.to(roomId).emit('host-changed', { newHostId: room.hostId });
-          } else {
-            // Close room if no speakers
-            room.isActive = false;
-            room.endedAt = new Date();
-            await room.save();
-            io.to(roomId).emit('room-closed');
-            io.socketsLeave(roomId);
-            return;
-          }
-        }
+        // FIX: We removed the logic that destroyed the room when the host left!
+        // Now, the room stays alive until the timer expires.
         
         socket.leave(roomId);
         socket.to(roomId).emit('user-left', { userId: socket.user._id });
