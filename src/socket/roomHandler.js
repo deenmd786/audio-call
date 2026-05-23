@@ -112,49 +112,93 @@ const setupRoomHandlers = (io, socket, socketToUser, userToSockets) => {
     }
   });
   
-  // Approve speaker (host only)
+ // Approve speaker (host only) - GOD MODE
   socket.on('approve-speaker', async ({ roomId, userId }) => {
     try {
       const room = await AudioRoom.findById(roomId);
+      
+      // Check if user has Host Privileges
       if (room && room.isActive && room.hostId.equals(socket.user._id)) {
-        const approved = await room.approveSpeaker(userId);
-        if (approved) {
-          io.to(roomId).emit('speaker-approved', { userId });
-          
-          const otherSpeakers = room.speakers.filter(s => !s.userId.equals(userId));
-          io.to(roomId).emit('new-speaker-joined', { userId });
-          
-          const newSpeakerSockets = getUserSockets(userId, userToSockets);
-          newSpeakerSockets.forEach(socketId => {
-            io.to(socketId).emit('become-speaker', { 
-              roomId,
-              otherSpeakers: otherSpeakers.map(s => s.userId)
-            });
-          });
+        
+        // 1. Forcefully remove them from listeners if they are there
+        room.listeners = room.listeners.filter(l => l.userId.toString() !== userId.toString());
+        
+        // 2. Forcefully add them to speakers
+        const isAlreadySpeaker = room.speakers.some(s => s.userId.toString() === userId.toString());
+        if (!isAlreadySpeaker) {
+          room.speakers.push({ userId, isMuted: false });
         }
+        
+        await room.save();
+        
+        // 3. Emit success events instantly
+        io.to(roomId).emit('speaker-approved', { userId });
+        
+        const otherSpeakers = room.speakers.filter(s => s.userId.toString() !== userId.toString());
+        io.to(roomId).emit('new-speaker-joined', { userId });
+        
+        const newSpeakerSockets = getUserSockets(userId, userToSockets);
+        newSpeakerSockets.forEach(socketId => {
+          io.to(socketId).emit('become-speaker', { 
+            roomId,
+            otherSpeakers: otherSpeakers.map(s => s.userId)
+          });
+        });
       }
     } catch (error) {
       console.error('Error approving speaker:', error);
     }
   });
   
-  // Demote speaker to listener (host only)
+  // Demote speaker to listener (host only) - GOD MODE
   socket.on('demote-speaker', async ({ roomId, userId }) => {
     try {
       const room = await AudioRoom.findById(roomId);
+      
+      // Check if user has Host Privileges
       if (room && room.isActive && room.hostId.equals(socket.user._id)) {
-        const demoted = await room.demoteToListener(userId);
-        if (demoted) {
-          io.to(roomId).emit('speaker-demoted', { userId });
-          
-          const demotedSockets = getUserSockets(userId, userToSockets);
-          demotedSockets.forEach(socketId => {
-            io.to(socketId).emit('become-listener', { roomId });
-          });
+        
+        // 1. Forcefully remove from speakers
+        room.speakers = room.speakers.filter(s => s.userId.toString() !== userId.toString());
+        
+        // 2. Forcefully add to listeners
+        const isAlreadyListener = room.listeners.some(l => l.userId.toString() === userId.toString());
+        if (!isAlreadyListener) {
+          room.listeners.push({ userId, handRaised: false });
         }
+        
+        await room.save();
+
+        // 3. Emit success events instantly
+        io.to(roomId).emit('speaker-demoted', { userId });
+        
+        const demotedSockets = getUserSockets(userId, userToSockets);
+        demotedSockets.forEach(socketId => {
+          io.to(socketId).emit('become-listener', { roomId });
+        });
       }
     } catch (error) {
       console.error('Error demoting speaker:', error);
+    }
+  });
+
+  // Transfer Host Ownership (Current Host Only)
+  socket.on('transfer-host', async ({ roomId, newHostId }) => {
+    try {
+      const room = await AudioRoom.findById(roomId);
+      
+      // Security Check: Only the current host can give away the keys!
+      if (room && room.isActive && room.hostId.equals(socket.user._id)) {
+        
+        // Update the database with the new host
+        room.hostId = newHostId;
+        await room.save();
+
+        // Announce the transfer to everyone in the room
+        io.to(roomId).emit('host-transferred', { newHostId });
+      }
+    } catch (error) {
+      console.error('Error transferring host:', error);
     }
   });
   
