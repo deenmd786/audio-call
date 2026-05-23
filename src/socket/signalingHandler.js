@@ -1,6 +1,6 @@
 const setupSignalingHandlers = (io, socket, socketToUser) => {
   // 1-on-1 call signaling
-  socket.on('call-user', ({ userToCall, offer }) => {
+   socket.on('call-user', ({ userToCall, offer }) => {
     const targetSocketId = getSocketIdByUserId(userToCall, socketToUser);
     if (targetSocketId) {
       io.to(targetSocketId).emit('incoming-call', {

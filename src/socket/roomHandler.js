@@ -1,5 +1,25 @@
 const AudioRoom = require('../models/AudioRoom');
 
+// Helper to get all socket IDs for a user
+const getUserSockets = (userId, userToSockets) => {
+  const sockets = userToSockets.get(userId);
+  return sockets ? Array.from(sockets) : [];
+};
+
+// Helper to generate perfectly formatted room state for the Flutter app
+const getRoomState = (room, socket) => {
+  return {
+    roomId: room._id,
+    title: room.title,
+    hostId: room.hostId,
+    expiresAt: room.expiresAt, // Added expiresAt so Flutter knows when time is up
+    speakers: room.speakers.map(s => ({ userId: s.userId, isMuted: s.isMuted })),
+    listeners: room.listeners.map(l => ({ userId: l.userId, handRaised: l.handRaised })),
+    currentUserRole: room.hostId.equals(socket.user._id) ? 'host' : 
+                   room.speakers.some(s => s.userId.equals(socket.user._id)) ? 'speaker' : 'listener'
+  };
+};
+
 const setupRoomHandlers = (io, socket, socketToUser, userToSockets) => {
   
   // Join audio room
@@ -11,40 +31,52 @@ const setupRoomHandlers = (io, socket, socketToUser, userToSockets) => {
         return;
       }
       
-      // FIX: If the HOST joins, put them in speakers. Otherwise, put them in listeners.
-      if (room.hostId.equals(socket.user._id)) {
-        if (!room.speakers.some(s => s.userId.equals(socket.user._id))) {
-          room.speakers.push({ userId: socket.user._id, isMuted: false });
-        }
-        // Ensure they aren't stuck in listeners
-        room.listeners = room.listeners.filter(l => !l.userId.equals(socket.user._id));
-        await room.save();
-      } else {
+      // INDUSTRY STANDARD FIX: Everyone joins the audience first. 
+      // If the host rejoins, they must use "Jump to Stage" to re-activate WebRTC.
+      if (!room.speakers.some(s => s.userId.equals(socket.user._id))) {
         await room.addListener(socket.user._id);
       }
       
       socket.join(roomId);
       
-      const roomState = {
-        roomId: room._id,
-        title: room.title,
-        hostId: room.hostId,
-        speakers: room.speakers.map(s => ({ userId: s.userId, isMuted: s.isMuted })),
-        listeners: room.listeners.map(l => ({ userId: l.userId, handRaised: l.handRaised })),
-        currentUserRole: room.hostId.equals(socket.user._id) ? 'host' : 
-                       room.speakers.some(s => s.userId.equals(socket.user._id)) ? 'speaker' : 'listener'
-      };
+      const roomState = getRoomState(room, socket);
       
       socket.to(roomId).emit('user-joined', {
         userId: socket.user._id,
         username: socket.user.username,
-        role: room.hostId.equals(socket.user._id) ? 'host' : 'listener'
+        role: 'listener' // Tell everyone else this person joined the audience
       });
       
       socket.emit('join-room-response', { success: true, roomState });
     } catch (error) {
       console.error('Error joining room:', error);
       socket.emit('join-room-response', { success: false, error: 'Failed to join room' });
+    }
+  });
+
+  // BULLETPROOF SYNC: Allows Flutter to request the exact room state at any time
+  socket.on('request-room-sync', async ({ roomId }) => {
+    try {
+      const room = await AudioRoom.findById(roomId);
+      if (room && room.isActive) {
+        socket.emit('room-sync-response', { success: true, roomState: getRoomState(room, socket) });
+      }
+    } catch (error) {
+      console.error('Error syncing room:', error);
+    }
+  });
+
+  // EXTEND TIME: Adds 30 minutes to the room
+  socket.on('extend-room', async ({ roomId }) => {
+    try {
+      const room = await AudioRoom.findById(roomId);
+      if (room && room.isActive && room.hostId.equals(socket.user._id)) {
+        room.expiresAt = new Date(Date.now() + 30 * 60 * 1000); // Add 30 mins
+        await room.save();
+        io.to(roomId).emit('room-extended', { expiresAt: room.expiresAt });
+      }
+    } catch (error) {
+      console.error('Error extending room:', error);
     }
   });
   
@@ -54,10 +86,6 @@ const setupRoomHandlers = (io, socket, socketToUser, userToSockets) => {
       const room = await AudioRoom.findById(roomId);
       if (room && room.isActive) {
         await room.removeParticipant(socket.user._id);
-        
-        // FIX: We removed the logic that destroyed the room when the host left!
-        // Now, the room stays alive until the timer expires.
-        
         socket.leave(roomId);
         socket.to(roomId).emit('user-left', { userId: socket.user._id });
       }
@@ -93,11 +121,9 @@ const setupRoomHandlers = (io, socket, socketToUser, userToSockets) => {
         if (approved) {
           io.to(roomId).emit('speaker-approved', { userId });
           
-          // Establish WebRTC connections with all existing speakers
           const otherSpeakers = room.speakers.filter(s => !s.userId.equals(userId));
           io.to(roomId).emit('new-speaker-joined', { userId });
           
-          // Notify the new speaker to initiate connections
           const newSpeakerSockets = getUserSockets(userId, userToSockets);
           newSpeakerSockets.forEach(socketId => {
             io.to(socketId).emit('become-speaker', { 
@@ -121,7 +147,6 @@ const setupRoomHandlers = (io, socket, socketToUser, userToSockets) => {
         if (demoted) {
           io.to(roomId).emit('speaker-demoted', { userId });
           
-          // Notify the demoted user to disconnect their audio streams
           const demotedSockets = getUserSockets(userId, userToSockets);
           demotedSockets.forEach(socketId => {
             io.to(socketId).emit('become-listener', { roomId });
@@ -153,12 +178,6 @@ const setupRoomHandlers = (io, socket, socketToUser, userToSockets) => {
       console.error('Error toggling mute:', error);
     }
   });
-};
-
-// Helper to get all socket IDs for a user
-const getUserSockets = (userId, userToSockets) => {
-  const sockets = userToSockets.get(userId);
-  return sockets ? Array.from(sockets) : [];
 };
 
 module.exports = { setupRoomHandlers };
